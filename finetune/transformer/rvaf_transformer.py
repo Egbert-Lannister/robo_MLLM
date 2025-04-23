@@ -5,15 +5,35 @@ from diffusers.models.transformers import CogVideoXTransformer3DModel
 
 
 class RoboTransformer(CogVideoXTransformer3DModel):
-    def __init__(self, action_dim: int, *args, **kwargs):
+    """
+    A modified CogVideoXTransformer3DModel that adds action prediction capabilities.
+    
+    This model extends the standard transformer by adding:
+    1. Action embedding - to incorporate action data during training
+    2. Action predictor - to predict actions during inference
+    
+    Args:
+        action_dim (int, optional): Dimension of the action vectors. Defaults to 8.
+        *args: Arguments to pass to the parent class
+        **kwargs: Keyword arguments to pass to the parent class
+    """
+    
+    def __init__(self, action_dim: int = 8, *args, **kwargs):
+        # Call parent init first
         super().__init__(*args, **kwargs)
+        
+        # Store action dimension
         self.action_dim = action_dim
-
+        
+        # Add action-specific components after parent initialization
+        # Calculate inner_dim just like in the parent class
+        inner_dim = self.config.num_attention_heads * self.config.attention_head_dim
+        
         # Define action embedding layer
         self.action_embedding = nn.Linear(action_dim, self.config.time_embed_dim)
         
-        # Modify the final output layer to include action prediction
-        self.action_predictor = nn.Linear(self.config.inner_dim, action_dim)
+        # Add action predictor that uses the mean of the hidden states
+        self.action_predictor = nn.Linear(inner_dim, action_dim)
 
     def forward(
         self,

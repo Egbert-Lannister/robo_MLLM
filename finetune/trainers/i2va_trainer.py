@@ -40,7 +40,7 @@ class I2VATrainer(Trainer):
         """
         Load model components required for I2VA training.
         """
-        model_path = self.args.model_path or os.environ.get(MODEL_PATH)
+        model_path = self.args.model_path or os.environ.get("MODEL_PATH", None)
         if model_path is None:
             raise ValueError("No model path specified. Please set MODEL_PATH environment variable or provide model_path argument.")
         
@@ -52,11 +52,18 @@ class I2VATrainer(Trainer):
         from diffusers.models import AutoencoderKLCogVideoX
         vae = AutoencoderKLCogVideoX.from_pretrained(model_path, subfolder="vae")
         
+        # Use default action_dim=8 if not provided in args
+        # Based on the dataset structure: rotation_delta(3) + open_gripper(1) + world_vector(3) + terminate_episode(1)
+        action_dim = getattr(self.args, 'action_dim', 8)
+        
         # Load transformer for the diffusion model with action support
+        # Adding ignore_mismatched_sizes=True and low_cpu_mem_usage=False to handle architecture differences
         transformer = RoboTransformer.from_pretrained(
             model_path, 
             subfolder="transformer",
-            action_dim=self.args.action_dim
+            action_dim=action_dim,
+            ignore_mismatched_sizes=True,
+            low_cpu_mem_usage=False
         )
         
         # Create action predictor component (if needed as a separate component)
