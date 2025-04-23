@@ -28,7 +28,7 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from finetune.constants import LOG_LEVEL, LOG_NAME
-from finetune.datasets import I2VDatasetWithResize, I2VADatasetWithResize
+from finetune.datasets import I2VADatasetWithResize
 from finetune.datasets.utils import (
     load_images,
     load_prompts,

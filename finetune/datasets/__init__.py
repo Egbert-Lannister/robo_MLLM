@@ -1,6 +1,5 @@
 from .bucket_sampler import BucketSampler
 from .i2v_dataset import I2VDatasetWithBuckets, I2VDatasetWithResize
-from .t2v_dataset import T2VDatasetWithBuckets, T2VDatasetWithResize
 from .i2va_dataset import I2VADatasetWithBuckets, I2VADatasetWithResize
 
 
