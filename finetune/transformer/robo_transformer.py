@@ -15,6 +15,8 @@ from diffusers.models.embeddings import CogVideoXPatchEmbed, TimestepEmbedding, 
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.normalization import AdaLayerNorm, CogVideoXLayerNormZero
+import os
+import json
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -141,6 +143,136 @@ class CogVideoXBlock(nn.Module):
         encoder_hidden_states = encoder_hidden_states + enc_gate_ff * ff_output[:, :text_seq_length]
 
         return hidden_states, encoder_hidden_states
+
+
+class ActionPredictor(nn.Module):
+    """
+    A neural network model for predicting robot actions from latent representations.
+    
+    This model takes latent representations from the transformer model and outputs
+    action vectors for robotic control. It uses a multi-layer perceptron architecture
+    to map from latent space to action space.
+    
+    Args:
+        latent_dim (int): Dimension of the input latent vectors
+        hidden_dim (int): Dimension of the hidden layers
+        action_dim (int): Dimension of the output action vectors
+        num_layers (int, optional): Number of hidden layers. Defaults to 2.
+    """
+    
+    def __init__(
+        self,
+        latent_dim: int,
+        hidden_dim: int,
+        action_dim: int,
+        num_layers: int = 2,
+    ):
+        super().__init__()
+        
+        # Build MLP layers
+        layers = []
+        
+        # Input layer
+        layers.append(nn.Linear(latent_dim, hidden_dim))
+        layers.append(nn.ReLU())
+        
+        # Hidden layers
+        for _ in range(num_layers - 1):
+            layers.append(nn.Linear(hidden_dim, hidden_dim))
+            layers.append(nn.ReLU())
+        
+        # Output layer
+        layers.append(nn.Linear(hidden_dim, action_dim))
+        
+        # Create sequential model
+        self.model = nn.Sequential(*layers)
+        
+        # Store dimensions for future reference
+        self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
+        self.action_dim = action_dim
+        self.num_layers = num_layers
+    
+    def forward(self, latents: torch.Tensor, timesteps: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Predicts action vectors from latent representations.
+        
+        Args:
+            latents (torch.Tensor): Latent representations from the transformer
+                Shape: [batch_size, sequence_length, latent_dim]
+            timesteps (torch.Tensor, optional): Timestep embeddings, not used in the base implementation
+                but included for compatibility with diffusion models.
+        
+        Returns:
+            torch.Tensor: Predicted action vectors
+                Shape: [batch_size, sequence_length, action_dim]
+        """
+        # Check if we need to reshape the input
+        orig_shape = latents.shape
+        
+        # Flatten if needed (keeping batch dimension)
+        if len(orig_shape) > 2:
+            latents = latents.reshape(orig_shape[0], -1)
+        
+        # Run through the MLP
+        actions = self.model(latents)
+        
+        # Reshape output if needed
+        if len(orig_shape) > 2:
+            actions = actions.reshape(orig_shape[0], -1, self.action_dim)
+        
+        return actions
+    
+    def save_pretrained(self, save_directory: str):
+        """
+        Save the model weights and configuration to disk.
+        
+        Args:
+            save_directory (str): Directory where the model should be saved
+        """
+        os.makedirs(save_directory, exist_ok=True)
+        
+        # Save model weights
+        torch.save(self.state_dict(), os.path.join(save_directory, "action_predictor.pt"))
+        
+        # Save configuration
+        config = {
+            "latent_dim": self.latent_dim,
+            "hidden_dim": self.hidden_dim,
+            "action_dim": self.action_dim,
+            "num_layers": self.num_layers,
+        }
+        
+        with open(os.path.join(save_directory, "action_predictor_config.json"), "w") as f:
+            json.dump(config, f)
+    
+    @classmethod
+    def from_pretrained(cls, pretrained_model_path: str):
+        """
+        Load a pretrained model from disk.
+        
+        Args:
+            pretrained_model_path (str): Path to the directory containing the model files
+        
+        Returns:
+            ActionPredictor: Loaded model instance
+        """
+        # Load configuration
+        with open(os.path.join(pretrained_model_path, "action_predictor_config.json"), "r") as f:
+            config = json.load(f)
+        
+        # Create model with loaded config
+        model = cls(
+            latent_dim=config["latent_dim"],
+            hidden_dim=config["hidden_dim"],
+            action_dim=config["action_dim"],
+            num_layers=config["num_layers"],
+        )
+        
+        # Load weights
+        model.load_state_dict(torch.load(os.path.join(pretrained_model_path, "action_predictor.pt")))
+        
+        return model
 
 
 class RoboTransformer(ModelMixin, ConfigMixin, PeftAdapterMixin, CacheMixin):

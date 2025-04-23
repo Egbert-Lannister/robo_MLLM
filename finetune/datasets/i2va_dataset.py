@@ -202,6 +202,7 @@ class BaseI2VADataset(Dataset):
         
         # print(f"Loading action data for index={index}")
         # print(f"Calling encode_action for action data")
+
         if action_embedding_path.exists():
             action_embedding = load_file(action_embedding_path)["action_embedding"]
             logger.debug(f"Loaded action embedding from {action_embedding_path}", main_process_only=False)
@@ -292,8 +293,11 @@ class I2VADatasetWithResize(BaseI2VADataset):
         # print("call the function", action)
         # print()
         # print((action - action.mean(dim=0)) / (action.std(dim=0) + 1e-6))
-        # return (action - action.mean(dim=0)) / (action.std(dim=0) + 1e-6)
-        return action
+        # Uncomment the following line if action standardization is required:
+        return (action - action.mean(dim=0)) / (action.std(dim=0) + 1e-6)
+        # No transformation is applied to the action tensor in this dataset.
+        # This method is overridden to maintain consistency with the base class interface.
+        # return action
 
 
 class I2VADatasetWithBuckets(BaseI2VADataset):

@@ -8,9 +8,10 @@ from diffusers.schedulers import CogVideoXDDIMScheduler, CogVideoXDPMScheduler
 from diffusers.models import AutoencoderKLCogVideoX
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.pipelines.cogvideo.pipeline_output import CogVideoXPipelineOutput
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-from transformer.robo_transformer import RoboTransformer  # Ensure your RoboTransformer model is imported
-
+# from transformer.robo_transformer import RoboTransformer  # Ensure your RoboTransformer model is imported
+from transformer.rvaf_transformer import RoboTransformer
 
 class RoboClosedLoopTransformerPipeline(DiffusionPipeline):
     """
