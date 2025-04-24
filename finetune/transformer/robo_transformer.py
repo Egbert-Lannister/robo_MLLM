@@ -25,8 +25,8 @@ logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 @maybe_allow_in_graph
 class CogVideoXBlock(nn.Module):
     r"""
-    Transformer block used in  model.
-
+    Transformer block used in model.
+    
     Parameters:
         dim (`int`):
             The number of channels in the input and output.
