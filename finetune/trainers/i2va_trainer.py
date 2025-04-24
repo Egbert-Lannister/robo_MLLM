@@ -86,6 +86,29 @@ class I2VATrainer(Trainer):
             pipeline_cls=pipeline_cls,
         )
     
+    def prepare_for_training(self) -> None:
+        """
+        Override the parent class method to handle the embedded action predictor.
+        In I2VA model, the action predictor is embedded within the transformer, so
+        we don't need to handle it separately.
+        """
+        # Only wrap transformer with accelerator.prepare()
+        self.components.transformer, self.optimizer, self.data_loader, self.lr_scheduler = self.accelerator.prepare(
+            self.components.transformer, self.optimizer, self.data_loader, self.lr_scheduler
+        )
+
+        # In this model, the action predictor is embedded in the transformer
+        # So we set it to point to the transformer's action predictor
+        # This maintains compatibility with the parent class's compute_loss
+        self.action_predictor = self.components.transformer.action_predictor
+
+        # Update training steps and epochs
+        num_update_steps_per_epoch = math.ceil(len(self.data_loader) / self.args.gradient_accumulation_steps)
+        if self.state.overwrote_max_train_steps:
+            self.args.train_steps = self.args.train_epochs * num_update_steps_per_epoch
+        self.args.train_epochs = math.ceil(self.args.train_steps / num_update_steps_per_epoch)
+        self.state.num_update_steps_per_epoch = num_update_steps_per_epoch
+        
     def initialize_pipeline(self) -> DiffusionPipeline:
         """
         Initialize a pipeline for inference.
@@ -214,7 +237,17 @@ class I2VATrainer(Trainer):
         noisy_latents = self.components.scheduler.add_noise(encoded_video, noise, timesteps)
         
         # Prepare inputs for the transformer model
-        latent_input = torch.cat([noisy_latents, image.unsqueeze(1)], dim=2)
+        # 修复：确保image与noisy_latents在通道维度匹配
+        # 先用VAE编码图像，确保通道维度一致
+        with torch.no_grad():
+            # 将图像添加batch维度，然后用VAE编码
+            image_latents = self.components.vae.encode(image.unsqueeze(1)).latent_dist.sample()
+            # 应用缩放因子
+            scaling_factor = self.components.vae.config.scaling_factor
+            image_latents = image_latents * scaling_factor
+        
+        # 现在连接编码后的图像潜变量和噪声视频潜变量
+        latent_input = torch.cat([noisy_latents, image_latents], dim=2)
         
         # Forward pass through transformer
         model_output = self.components.transformer(
