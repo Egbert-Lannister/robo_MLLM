@@ -302,16 +302,6 @@ class I2VADatasetWithResize(BaseI2VADataset):
     
     @override
     def action_transform(self, action: torch.Tensor) -> torch.Tensor:
-        # Normalize or otherwise transform action data if needed
-        # Here, we simply standardize to [-1, 1] range assuming input values are float
-        # You can customize this normalization logic based on dataset statistics
-        # print("call the function", action)
-        # print()
-        # print((action - action.mean(dim=0)) / (action.std(dim=0) + 1e-6))
-        # Uncomment the following line if action standardization is required:
-        # return (action - action.mean(dim=0)) / (action.std(dim=0) + 1e-6)
-        # No transformation is applied to the action tensor in this dataset.
-        # This method is overridden to maintain consistency with the base class interface.
         return action
 
 
