@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Tuple
 
+import numpy as np
 import torch
 from accelerate.logging import get_logger
 from safetensors.torch import load_file, save_file
@@ -75,10 +76,6 @@ class BaseI2VADataset(Dataset):
         self.encode_video = trainer.encode_video
         self.encode_text = trainer.encode_text
         self.encode_action = trainer.encode_action
-        # print(f"encode_video: {self.encode_video}")
-        # print(f"encode_text: {self.encode_text}")
-        # print(f"encode_action: {self.encode_action}")
-
 
         # Check if number of prompts matches number of videos and images and actions
         if not (len(self.videos) == len(self.prompts) == len(self.images) == len(self.actions)):
@@ -109,7 +106,7 @@ class BaseI2VADataset(Dataset):
         Load action data from a JSON file and preprocess it to a tensor of shape (T, D),
         where T = max_num_frames and D is the flattened dimension of all action keys.
         """
-        print(f"Calling encode_action in {self.__class__.__name__}")
+        print(f"Calling action in {self.__class__.__name__}")
         with open(action_path, 'r') as f:
             action_data = json.load(f)
 
@@ -128,16 +125,38 @@ class BaseI2VADataset(Dataset):
 
         # Truncate or pad to max_timesteps
         T, D = action_tensor.shape
-        if T > max_timesteps:
-            action_tensor = action_tensor[:max_timesteps]
-        elif T < max_timesteps:
-            padding = torch.zeros((max_timesteps - T, D))
-            action_tensor = torch.cat([action_tensor, padding], dim=0)
+        if T != max_timesteps:
+            # Generate new time points for interpolation
+            original_time = np.arange(T)
+            new_time = np.linspace(0, T-1, max_timesteps)
+
+            # Interpolate each feature dimension
+            interpolated_actions = []
+            for d in range(D):
+                feature = action_tensor[:, d].numpy()
+                interpolated_feature = np.interp(new_time, original_time, feature)
+                interpolated_actions.append(interpolated_feature)
+
+            action_tensor = torch.tensor(interpolated_actions).T
+        
+        # Normalize function
+        def normalize(tensor_slice):
+            mean = tensor_slice.mean(dim=0)
+            std = tensor_slice.std(dim=0) + 1e-6  # Avoid division by zero
+            return (tensor_slice - mean) / std
+        
+        # Normalize action tensor
+        action_tensor[:, :3] = normalize(action_tensor[:, :3])  # Normalize "rotation_delta"
+        action_tensor[:, 4:7] = normalize(action_tensor[:, 4:7])  # Normalize "world_vector"
 
         # Apply action transform
         return self.action_transform(action_tensor)
 
+
     def __len__(self) -> int:
+        """
+        Returns the number of items in the dataset.
+        """
         return len(self.videos)
 
 
@@ -199,10 +218,6 @@ class BaseI2VADataset(Dataset):
             save_file({"encoded_video": encoded_video}, encoded_video_path)
             logger.info(f"Saved encoded video to {encoded_video_path}", main_process_only=False)
         
-        
-        # print(f"Loading action data for index={index}")
-        # print(f"Calling encode_action for action data")
-
         if action_embedding_path.exists():
             action_embedding = load_file(action_embedding_path)["action_embedding"]
             logger.debug(f"Loaded action embedding from {action_embedding_path}", main_process_only=False)
@@ -294,10 +309,10 @@ class I2VADatasetWithResize(BaseI2VADataset):
         # print()
         # print((action - action.mean(dim=0)) / (action.std(dim=0) + 1e-6))
         # Uncomment the following line if action standardization is required:
-        return (action - action.mean(dim=0)) / (action.std(dim=0) + 1e-6)
+        # return (action - action.mean(dim=0)) / (action.std(dim=0) + 1e-6)
         # No transformation is applied to the action tensor in this dataset.
         # This method is overridden to maintain consistency with the base class interface.
-        # return action
+        return action
 
 
 class I2VADatasetWithBuckets(BaseI2VADataset):

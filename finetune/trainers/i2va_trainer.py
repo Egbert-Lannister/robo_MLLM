@@ -332,6 +332,24 @@ class I2VATrainer(Trainer):
         # 记录我们正在使用临时解决方案
         logger.warning("使用临时随机损失以绕过模型错误。请确保随后使用正确配置重新训练模型。")
         
+        # In compute_loss method, before the transformer call:
+        # 1. Process noisy_latents to match expected input format
+        # Reshape from [B, C, F, H, W] to [B, F, C, H, W] if needed
+        noisy_latents = noisy_latents.permute(0, 2, 1, 3, 4)
+
+        # 2. When calling the transformer, add the action embedding:
+        model_output = self.components.transformer(
+            hidden_states=noisy_latents,
+            encoder_hidden_states=prompt_embedding,
+            actions=action_embedding,  # Pass action embeddings
+            timestep=timesteps,
+            return_dict=True
+        )
+
+        # The output should contain both video and action predictions
+        video_pred = model_output['sample']
+        action_pred = model_output['action']
+        
         return total_loss
     
     def validation_step(self, sample, pipe) -> List[Tuple[str, Any]]:
