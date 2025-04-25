@@ -20,7 +20,8 @@ from finetune.trainer import Trainer
 from finetune.utils import unwrap_model
 
 
-class RoboMultimodalTrainer(Trainer):
+class RoboMultimodelTrainer(Trainer):
+    UNLOAD_LIST = ["text_encoder"]
     """
     Trainer for RoboMultimodal model.
     """
@@ -99,17 +100,18 @@ class RoboMultimodalTrainer(Trainer):
             encoded_video = sample["encoded_video"]
             prompt_embedding = sample["prompt_embedding"]
             image = sample["image"]
-            encoded_action = sample["encoded_action"]
+            action_embedding = sample["action_embedding"]
 
             ret["encoded_videos"].append(encoded_video)
-            ret["encoded_actions"].append(encoded_action)
+            ret["encoded_actions"].append(action_embedding)
             ret["prompt_embedding"].append(prompt_embedding)
             ret["images"].append(image)
 
+        # Stack all tensors except encoded_actions which may have variable lengths
         ret["encoded_videos"] = torch.stack(ret["encoded_videos"])
-        ret["encoded_actions"] = torch.stack(ret["encoded_actions"])
         ret["prompt_embedding"] = torch.stack(ret["prompt_embedding"])
         ret["images"] = torch.stack(ret["images"])
+        # Keep encoded_actions as a list - do not stack
 
         return ret
     
@@ -149,12 +151,12 @@ class RoboMultimodalTrainer(Trainer):
         prompt_embedding = batch["prompt_embedding"]
         latent = batch["encoded_videos"]
         images = batch["images"]
-        encoded_actions = batch["encoded_actions"]
+        encoded_actions = batch["encoded_actions"]  # This is now a list of tensors with different lengths
 
         # Shape of prompt_embedding: [B, seq_len, hidden_size]
         # Shape of latent: [B, C, F, H, W]
         # Shape of images: [B, C, H, W]
-        # Shape of encoded_actions: [B, encoded_action]
+        # Shape of encoded_actions: List of encoded_action tensors with variable lengths
 
         patch_size_t = self.state.transformer_config.patch_size_t
         if patch_size_t is not None:
@@ -245,25 +247,29 @@ class RoboMultimodalTrainer(Trainer):
         video_loss = torch.mean((weights * (latent_pred - latent) ** 2).reshape(batch_size, -1), dim=1)
         video_loss = video_loss.mean()
 
-        # Calculate action loss
-        encoded_predicted_actions = self.encoded_action(predicted_actions)
-
-        actual_lengths_encoded_actions = torch.tensor([len(action) for action in encoded_actions]).to(self.accelerator.device)
-        actual_lengths_encoded_predicted_actions = torch.tensor([len(action) for action in encoded_predicted_actions]).to(self.accelerator.device)
-        max_length = max(actual_lengths_encoded_actions.max(), actual_lengths_encoded_predicted_actions.max())
-
-        # 将 encoded_actions 和 encoded_predicted_actions 截断到 max_length
-        encoded_actions_truncated = [action[:max_length] for action in encoded_actions]
-        encoded_predicted_actions_truncated = [action[:max_length] for action in encoded_predicted_actions]
-
-        mask = torch.arange(max_length, device=self.accelerator.device).expand(len(actual_lengths_encoded_actions), max_length)
-        mask = (mask < actual_lengths_encoded_actions.unsqueeze(1)) & (mask < actual_lengths_encoded_predicted_actions.unsqueeze(1))
-
-        action_loss = F.mse_loss(
-            encoded_predicted_actions_truncated[mask], 
-            encoded_actions_truncated[mask],
-            reduction="mean"
-        )
+        # Calculate action loss - process each sample individually due to variable lengths
+        total_action_loss = 0.0
+        for i in range(batch_size):
+            sample_predicted_action = predicted_actions[i]  # Get predicted action for this sample
+            sample_encoded_action = encoded_actions[i].to(self.accelerator.device)  # Get ground truth action for this sample
+            
+            # Encode the predicted action
+            encoded_predicted_action = self.encode_action(sample_predicted_action.unsqueeze(0)).to(self.accelerator.device)
+            
+            # Calculate length for both sequences and find the minimum
+            min_length = min(len(sample_encoded_action), len(encoded_predicted_action))
+            
+            # Calculate MSE loss on the common length
+            if min_length > 0:
+                sample_action_loss = F.mse_loss(
+                    encoded_predicted_action[:min_length], 
+                    sample_encoded_action[:min_length],
+                    reduction="mean"
+                )
+                total_action_loss += sample_action_loss
+        
+        # Average the action loss across the batch
+        action_loss = total_action_loss / batch_size if batch_size > 0 else 0.0
 
         # Combine losses with equal weights
         total_loss = video_loss + action_loss

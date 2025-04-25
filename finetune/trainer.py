@@ -1,3 +1,4 @@
+# trainer 
 import hashlib
 import json
 import logging
@@ -217,7 +218,7 @@ class Trainer:
         weight_dtype = self.state.weight_dtype
 
         if torch.backends.mps.is_available() and weight_dtype == torch.bfloat16:
-            # due to pytorch #99272, MPS does not yet support bfloat16.
+            # due to pytorch#99272, MPS does not yet support bfloat16.
             raise ValueError(
                 "Mixed precision training with bfloat16 is not supported on MPS. Please use fp16 (recommended) or fp32 instead."
             )
@@ -226,7 +227,6 @@ class Trainer:
         # For SFT, we train all the parameters in transformer model
         for attr_name, component in vars(self.components).items():
             if hasattr(component, "requires_grad_"):
-                # if self.args.training_type == "sft" and attr_name in ["transformer", "action_predictor"]:
                 if self.args.training_type == "sft" and attr_name == "transformer":
                     component.requires_grad_(True)
                 else:
@@ -323,35 +323,48 @@ class Trainer:
 
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
-
+    
     def prepare_for_training(self) -> None:
-        logger.debug("[DEBUG] Preparing for training...")
-
-        # ✅ only wrap transformer with accelerator.prepare()
         self.components.transformer, self.optimizer, self.data_loader, self.lr_scheduler = self.accelerator.prepare(
             self.components.transformer, self.optimizer, self.data_loader, self.lr_scheduler
         )
 
-        # ✅ Move action_predictor to correct device and dtype manually
-        self.components.action_predictor = self.components.action_predictor.to(self.accelerator.device)
-        self.action_predictor = self.components.action_predictor  # just to reuse in compute_loss
-
-        logger.debug("[DEBUG] action_predictor moved to device (not wrapped with accelerator).")
-        
-        # (Optional) Print grad check for debugging
-        total_params = 0
-        for name, param in self.action_predictor.named_parameters():
-            if param.requires_grad:
-                logger.debug(f"{name:<40} requires_grad={param.requires_grad} shape={tuple(param.shape)}")
-                total_params += param.numel()
-        logger.debug(f"[DEBUG] Total trainable parameters in action_predictor: {total_params:,}")
-
-        # Update training steps and epochs
+        # We need to recalculate our total training steps as the size of the training dataloader may have changed.
         num_update_steps_per_epoch = math.ceil(len(self.data_loader) / self.args.gradient_accumulation_steps)
         if self.state.overwrote_max_train_steps:
             self.args.train_steps = self.args.train_epochs * num_update_steps_per_epoch
+        # Afterwards we recalculate our number of training epochs
         self.args.train_epochs = math.ceil(self.args.train_steps / num_update_steps_per_epoch)
         self.state.num_update_steps_per_epoch = num_update_steps_per_epoch
+
+    # def prepare_for_training(self) -> None:
+    #     logger.debug("[DEBUG] Preparing for training...")
+
+    #     # ✅ only wrap transformer with accelerator.prepare()
+    #     self.components.transformer, self.optimizer, self.data_loader, self.lr_scheduler = self.accelerator.prepare(
+    #         self.components.transformer, self.optimizer, self.data_loader, self.lr_scheduler
+    #     )
+
+    #     # ✅ Move action_predictor to correct device and dtype manually
+    #     self.components.action_predictor = self.components.action_predictor.to(self.accelerator.device)
+    #     self.action_predictor = self.components.action_predictor  # just to reuse in compute_loss
+
+    #     logger.debug("[DEBUG] action_predictor moved to device (not wrapped with accelerator).")
+        
+    #     # (Optional) Print grad check for debugging
+    #     total_params = 0
+    #     for name, param in self.action_predictor.named_parameters():
+    #         if param.requires_grad:
+    #             logger.debug(f"{name:<40} requires_grad={param.requires_grad} shape={tuple(param.shape)}")
+    #             total_params += param.numel()
+    #     logger.debug(f"[DEBUG] Total trainable parameters in action_predictor: {total_params:,}")
+
+    #     # Update training steps and epochs
+    #     num_update_steps_per_epoch = math.ceil(len(self.data_loader) / self.args.gradient_accumulation_steps)
+    #     if self.state.overwrote_max_train_steps:
+    #         self.args.train_steps = self.args.train_epochs * num_update_steps_per_epoch
+    #     self.args.train_epochs = math.ceil(self.args.train_steps / num_update_steps_per_epoch)
+    #     self.state.num_update_steps_per_epoch = num_update_steps_per_epoch
 
     def prepare_for_validation(self):
         validation_prompts = load_prompts(self.args.validation_dir / self.args.validation_prompts)
