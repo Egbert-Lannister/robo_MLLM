@@ -154,7 +154,7 @@ class RoboMultimodalTrainer(Trainer):
         # Shape of prompt_embedding: [B, seq_len, hidden_size]
         # Shape of latent: [B, C, F, H, W]
         # Shape of images: [B, C, H, W]
-        # Shape of actions: [B, action_dim]
+        # Shape of encoded_actions: [B, encoded_action]
 
         patch_size_t = self.state.transformer_config.patch_size_t
         if patch_size_t is not None:
@@ -246,7 +246,24 @@ class RoboMultimodalTrainer(Trainer):
         video_loss = video_loss.mean()
 
         # Calculate action loss
-        action_loss = F.mse_loss(predicted_actions, encoded_actions)
+        encoded_predicted_actions = self.encoded_action(predicted_actions)
+
+        actual_lengths_encoded_actions = torch.tensor([len(action) for action in encoded_actions]).to(self.accelerator.device)
+        actual_lengths_encoded_predicted_actions = torch.tensor([len(action) for action in encoded_predicted_actions]).to(self.accelerator.device)
+        max_length = max(actual_lengths_encoded_actions.max(), actual_lengths_encoded_predicted_actions.max())
+
+        # 将 encoded_actions 和 encoded_predicted_actions 截断到 max_length
+        encoded_actions_truncated = [action[:max_length] for action in encoded_actions]
+        encoded_predicted_actions_truncated = [action[:max_length] for action in encoded_predicted_actions]
+
+        mask = torch.arange(max_length, device=self.accelerator.device).expand(len(actual_lengths_encoded_actions), max_length)
+        mask = (mask < actual_lengths_encoded_actions.unsqueeze(1)) & (mask < actual_lengths_encoded_predicted_actions.unsqueeze(1))
+
+        action_loss = F.mse_loss(
+            encoded_predicted_actions_truncated[mask], 
+            encoded_actions_truncated[mask],
+            reduction="mean"
+        )
 
         # Combine losses with equal weights
         total_loss = video_loss + action_loss
