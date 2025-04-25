@@ -12,7 +12,7 @@ from diffusers.models.embeddings import get_3d_rotary_pos_embed
 
 from PIL import Image
 from numpy import dtype
-from transformers import AutoTokenizer, T5EncoderModel
+from transformers import AutoTokenizer, T5EncoderModel, AutoProcessor
 from typing_extensions import override
 
 from finetune.schemas import Components
@@ -71,18 +71,19 @@ class RoboMultimodalTrainer(Trainer):
 
 
     @override
-    def encode_action(self, action: str) -> torch.Tensor:
-        action_token_ids = self.components.tokenizer(
-            action,
-            padding="max_length",
-            max_length=self.state.transformer_config.max_text_seq_length,
-            truncation=True,
-            add_special_tokens=True,
-            return_tensors="pt",
-        )
-        action_token_ids = action_token_ids.input_ids
-        action_embedding = self.components.text_encoder(action_token_ids.to(self.accelerator.device))[0]
-        return action_embedding
+    def encode_action(self, action: torch.Tensor) -> torch.Tensor:
+        # Shape of action: [T, D]: (41, 8)
+        tokenizer = AutoProcessor.from_pretrained("/disk0/home/kuowei/robo_multimodal/action_tokenizer/fast", trust_remote_code=True)
+
+        action_token = tokenizer(action)
+
+        if isinstance(action_token, list):
+            action_token = torch.tensor(action_token)
+
+        if isinstance(action_token, torch.Tensor):
+            return action_token.squeeze(0)
+        else:
+            raise TypeError(f"Unexpected type for action_token: {type(action_token)}")
     
     
     @override
@@ -148,7 +149,7 @@ class RoboMultimodalTrainer(Trainer):
         prompt_embedding = batch["prompt_embedding"]
         latent = batch["encoded_videos"]
         images = batch["images"]
-        actions = batch["encoded_actions"]
+        encoded_actions = batch["encoded_actions"]
 
         # Shape of prompt_embedding: [B, seq_len, hidden_size]
         # Shape of latent: [B, C, F, H, W]
@@ -245,7 +246,7 @@ class RoboMultimodalTrainer(Trainer):
         video_loss = video_loss.mean()
 
         # Calculate action loss
-        action_loss = F.mse_loss(predicted_actions, actions)
+        action_loss = F.mse_loss(predicted_actions, encoded_actions)
 
         # Combine losses with equal weights
         total_loss = video_loss + action_loss

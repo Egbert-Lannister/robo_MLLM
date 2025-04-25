@@ -6,11 +6,12 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from finetune.schemas import Args
 # from finetune.trainers.robo_closed_loop_trainer import RoboClosedLoopTrainer
-from finetune.trainers.i2va_trainer import I2VATrainer
+# from finetune.trainers.i2va_trainer import I2VATrainer
+from finetune.trainers.robo_multimodal_trainer import RoboMultimodalTrainer
 
 def main():
     args = Args.parse_args()
-    trainer = I2VATrainer(args)
+    trainer = RoboMultimodalTrainer(args)
     trainer.fit()
 
 
