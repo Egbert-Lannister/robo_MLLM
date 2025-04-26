@@ -1,4 +1,5 @@
 # trainer 
+import os
 import hashlib
 import json
 import logging
@@ -24,6 +25,7 @@ from diffusers.optimization import get_scheduler
 from diffusers.pipelines import DiffusionPipeline
 from diffusers.utils.export_utils import export_to_video
 from peft import LoraConfig, get_peft_model_state_dict, set_peft_model_state_dict
+from safetensors.torch import load_file
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
@@ -325,6 +327,73 @@ class Trainer:
         self.lr_scheduler = lr_scheduler
     
     def prepare_for_training(self) -> None:
+        # --- Load transformer weights safely ---
+        if self.args.model_path is not None:
+            transformer_path = os.path.join(self.args.model_path, "transformer")
+
+            if not os.path.exists(transformer_path):
+                raise ValueError(f"Expected transformer weights under {transformer_path}, but directory does not exist.")
+            
+            print(f"Building a full instance of transformer...")
+            self.components.transformer = self.components.transformer.__class__(**self.components.transformer.config)
+
+            print(f"Loading transformer weights from {transformer_path}...")
+            index_file = os.path.join(transformer_path, "diffusion_pytorch_model.safetensors.index.json")
+            if not os.path.exists(index_file):
+                raise ValueError(f"No index file found at {index_file}.")
+            
+            with open(index_file, "r") as f:
+                index = json.load(f)
+
+            state_dict = {}
+            for shard_filename in set(index["weight_map"].values()):
+                shard_path = os.path.join(transformer_path, shard_filename)
+                shard_state_dict = load_file(shard_path, device="cpu")
+                state_dict.update(shard_state_dict)
+            
+            missing_keys, unexpected_keys = self.components.transformer.load_state_dict(state_dict, strict=False)
+
+            print(f"✅ Transformer weights loaded.")
+            print(f"Missing keys (new randomly initialized layers): {len(missing_keys)} params.")
+
+            # Manually reinitialize parameters still on meta
+            def initialize_meta_tensors(model):
+                for name, param in model.named_parameters():
+                    if param.device.type == "meta":
+                        print(f"Reinitializing meta parameter: {name}")
+                        param_materialized = torch.empty_like(param, device="cpu")
+                        if param_materialized.ndim >= 2:
+                            torch.nn.init.xavier_uniform_(param_materialized)
+                        else:
+                            torch.nn.init.zeros_(param_materialized)
+                        param.data = param_materialized
+                for name, buffer in model.named_buffers():
+                    if buffer.device.type == "meta":
+                        print(f"Reinitializing meta buffer: {name}")
+                        buffer_materialized = torch.zeros_like(buffer, device="cpu")
+                        buffer.data = buffer_materialized
+            
+            def check_meta_tensor(model):
+                meta_found = False
+                for name, param in model.named_parameters():
+                    if param.device.type == "meta":
+                        print(f"[META] parameter: {name}, shape: {param.shape}")
+                        meta_found = True
+                for name, buffer in model.named_buffers():
+                    if buffer.device.type == "meta":
+                        print(f"[META] buffer: {name}, shape: {buffer.shape}")
+                        meta_found = True
+                if not meta_found:
+                    print("✅ No meta tensors found after loading and reinitializing.")
+                return meta_found
+            
+            initialize_meta_tensors(self.components.transformer)
+            check_meta_tensor(self.components.transformer)
+
+        # --- end ---
+        self.prepare_optimizer()
+
+        # Prepare (with deepspeed)
         self.components.transformer, self.optimizer, self.data_loader, self.lr_scheduler = self.accelerator.prepare(
             self.components.transformer, self.optimizer, self.data_loader, self.lr_scheduler
         )
@@ -336,35 +405,6 @@ class Trainer:
         # Afterwards we recalculate our number of training epochs
         self.args.train_epochs = math.ceil(self.args.train_steps / num_update_steps_per_epoch)
         self.state.num_update_steps_per_epoch = num_update_steps_per_epoch
-
-    # def prepare_for_training(self) -> None:
-    #     logger.debug("[DEBUG] Preparing for training...")
-
-    #     # ✅ only wrap transformer with accelerator.prepare()
-    #     self.components.transformer, self.optimizer, self.data_loader, self.lr_scheduler = self.accelerator.prepare(
-    #         self.components.transformer, self.optimizer, self.data_loader, self.lr_scheduler
-    #     )
-
-    #     # ✅ Move action_predictor to correct device and dtype manually
-    #     self.components.action_predictor = self.components.action_predictor.to(self.accelerator.device)
-    #     self.action_predictor = self.components.action_predictor  # just to reuse in compute_loss
-
-    #     logger.debug("[DEBUG] action_predictor moved to device (not wrapped with accelerator).")
-        
-    #     # (Optional) Print grad check for debugging
-    #     total_params = 0
-    #     for name, param in self.action_predictor.named_parameters():
-    #         if param.requires_grad:
-    #             logger.debug(f"{name:<40} requires_grad={param.requires_grad} shape={tuple(param.shape)}")
-    #             total_params += param.numel()
-    #     logger.debug(f"[DEBUG] Total trainable parameters in action_predictor: {total_params:,}")
-
-    #     # Update training steps and epochs
-    #     num_update_steps_per_epoch = math.ceil(len(self.data_loader) / self.args.gradient_accumulation_steps)
-    #     if self.state.overwrote_max_train_steps:
-    #         self.args.train_steps = self.args.train_epochs * num_update_steps_per_epoch
-    #     self.args.train_epochs = math.ceil(self.args.train_steps / num_update_steps_per_epoch)
-    #     self.state.num_update_steps_per_epoch = num_update_steps_per_epoch
 
     def prepare_for_validation(self):
         validation_prompts = load_prompts(self.args.validation_dir / self.args.validation_prompts)
@@ -677,7 +717,7 @@ class Trainer:
         self.prepare_models()
         self.prepare_dataset()
         self.prepare_trainable_parameters()
-        self.prepare_optimizer()
+        # self.prepare_optimizer()
         self.prepare_for_training()
         if self.args.do_validation:
             self.prepare_for_validation()

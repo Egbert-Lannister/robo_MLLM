@@ -5,7 +5,6 @@ import torch.nn.functional as F
 from diffusers import (
     AutoencoderKLCogVideoX,
     CogVideoXDPMScheduler,
-    CogVideoXTransformer3DModel,
 )
 
 from diffusers.models.embeddings import get_3d_rotary_pos_embed
@@ -18,6 +17,7 @@ from typing_extensions import override
 from finetune.schemas import Components
 from finetune.trainer import Trainer
 from finetune.utils import unwrap_model
+from finetune.transformer.transformer import RoboMultiTransformerModel
 
 
 class RoboMultimodelTrainer(Trainer):
@@ -37,7 +37,7 @@ class RoboMultimodelTrainer(Trainer):
 
         components.text_encoder = T5EncoderModel.from_pretrained(model_path, subfolder="text_encoder")
 
-        components.transformer = CogVideoXTransformer3DModel.from_pretrained(model_path, subfolder="transformer")
+        components.transformer = RoboMultiTransformerModel.from_pretrained(model_path, subfolder="transformer")
 
         components.vae = AutoencoderKLCogVideoX.from_pretrained(model_path, subfolder="vae")
 

@@ -531,7 +531,15 @@ class RoboMultiTransformerModel(ModelMixin, ConfigMixin, PeftAdapterMixin, Cache
         hidden_states_video = self.proj_out(hidden_states_video)
 
         # 5. Action Prediction
-        predicted_actions = self.action_transformer(hidden_states)  # [B, 41, 8]
+        B, T_total, D = hidden_states.shape
+        num_patches_per_frame = (self.config.sample_height // self.config.patch_size) * (self.config.sample_width // self.config.patch_size)
+        latent_num_frames = self.config.sample_frames
+        
+        hidden_states_for_action = hidden_states.view(B, latent_num_frames, num_patches_per_frame, D)
+        hidden_states_for_action = hidden_states_for_action.mean(dim=2)  # [B, latent_num_frames, D]
+
+
+        predicted_actions = self.action_transformer(hidden_states_for_action)  # Shape: [B, 41, 8]
 
         # 6. Unpatchify
         p = self.config.patch_size
