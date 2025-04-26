@@ -225,11 +225,7 @@ class BaseI2VADataset(Dataset):
             logger.debug(f"Loaded action embedding from {action_embedding_path}", main_process_only=False)
         else:
             action_data = self.load_and_preprocess_action(action, self.max_num_frames)
-            print(f"[DEBUG] action_data.shape: {action_data.shape}")
-            print(f"[DEBUG] action_data: {action_data.dtype}")
             action_embedding = self.encode_action(action_data)
-            print(f"[DEBUG] action_embedding.shape: {action_embedding.shape}")
-            # breakpoint()  # 添加断点
             action_embedding = action_embedding.to("cpu")
             save_file({"action_embedding": action_embedding}, action_embedding_path)
             logger.info(f"Saved action embedding to {action_embedding_path}", main_process_only=False)

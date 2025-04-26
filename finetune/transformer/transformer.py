@@ -351,7 +351,7 @@ class RoboMultiTransformerModel(ModelMixin, ConfigMixin, PeftAdapterMixin, Cache
         self.action_transformer = ActionTransformer(
             input_dim=num_attention_heads * attention_head_dim,
             hidden_dim=512,  # 默认就行
-            output_dim=self.pred_action_dim * self.pred_action_length,  # 328 = 41 * 8
+            # output_dim=self.pred_action_dim * self.pred_action_length,  # 328 = 41 * 8
             num_layers=2,
             num_heads=8,
             dropout=0.1,

@@ -73,7 +73,15 @@ class RoboMultimodelTrainer(Trainer):
 
     @override
     def encode_action(self, action: torch.Tensor) -> torch.Tensor:
-        # Shape of action: [T, D]: (41, 8)
+        """
+        Encode the input action into a fixed-length token tensor of shape [168].
+
+        Args:
+            action (torch.Tensor): Input tensor with shape [T, D] (e.g., [41, 8]).
+
+        Returns:
+            torch.Tensor: Encoded token tensor with shape [168].
+        """
         tokenizer = AutoProcessor.from_pretrained("/disk0/home/kuowei/robo_multimodal/action_tokenizer/fast", trust_remote_code=True)
 
         action_token = tokenizer(action)
@@ -81,10 +89,26 @@ class RoboMultimodelTrainer(Trainer):
         if isinstance(action_token, list):
             action_token = torch.tensor(action_token)
 
-        if isinstance(action_token, torch.Tensor):
-            return action_token.squeeze(0)
-        else:
+        if not isinstance(action_token, torch.Tensor):
             raise TypeError(f"Unexpected type for action_token: {type(action_token)}")
+        
+        action_token = action_token.squeeze(0)
+        if action_token.dim() != 1:
+            raise ValueError(f"Expected 1D token, but got shape {action_token.shape}")
+
+        # Pad or truncate to fixed length 168
+        target_length = 168
+        current_length = action_token.size(0)
+
+        if current_length < target_length:
+            # Padding
+            padding = torch.zeros(target_length - current_length, dtype=action_token.dtype, device=action_token.device)
+            action_token = torch.cat([action_token, padding], dim=0)
+        elif current_length > target_length:
+            # Truncating
+            action_token = action_token[:target_length]
+
+        return action_token
     
     
     @override
@@ -107,11 +131,11 @@ class RoboMultimodelTrainer(Trainer):
             ret["prompt_embedding"].append(prompt_embedding)
             ret["images"].append(image)
 
-        # Stack all tensors except encoded_actions which may have variable lengths
+        # Stack all tensors
         ret["encoded_videos"] = torch.stack(ret["encoded_videos"])
         ret["prompt_embedding"] = torch.stack(ret["prompt_embedding"])
         ret["images"] = torch.stack(ret["images"])
-        # Keep encoded_actions as a list - do not stack
+        ret["encoded_actions"] = torch.stack(ret["encoded_actions"])
 
         return ret
     
@@ -156,7 +180,7 @@ class RoboMultimodelTrainer(Trainer):
         # Shape of prompt_embedding: [B, seq_len, hidden_size]
         # Shape of latent: [B, C, F, H, W]
         # Shape of images: [B, C, H, W]
-        # Shape of encoded_actions: List of encoded_action tensors with variable lengths
+        # Shape of encoded_actions: [B, 168]
 
         patch_size_t = self.state.transformer_config.patch_size_t
         if patch_size_t is not None:
@@ -247,34 +271,12 @@ class RoboMultimodelTrainer(Trainer):
         video_loss = torch.mean((weights * (latent_pred - latent) ** 2).reshape(batch_size, -1), dim=1)
         video_loss = video_loss.mean()
 
-        # Calculate action loss - process each sample individually due to variable lengths
-        total_action_loss = 0.0
-        for i in range(batch_size):
-            sample_predicted_action = predicted_actions[i]  # Get predicted action for this sample
-            sample_encoded_action = encoded_actions[i].to(self.accelerator.device)  # Get ground truth action for this sample
-            
-            # Encode the predicted action
-            # encoded_predicted_action = self.encode_action(sample_predicted_action.unsqueeze(0)).to(self.accelerator.device)
-            encoded_predicted_action = sample_predicted_action
-            print(f"encoded_predicted_action: {encoded_predicted_action.device}")
-            print(f"sample_encoded_action: {sample_encoded_action.device}")
-            print(f"encoded_predicted_action: {encoded_predicted_action.shape}")
-            print(f"sample_encoded_action: {sample_encoded_action.shape}")
-            
-            # Calculate length for both sequences and find the minimum
-            min_length = min(len(sample_encoded_action), len(encoded_predicted_action))
-            
-            # Calculate MSE loss on the common length
-            if min_length > 0:
-                sample_action_loss = F.mse_loss(
-                    encoded_predicted_action[:min_length],
-                    sample_encoded_action[:min_length],
-                    reduction="mean"
-                )
-                total_action_loss += sample_action_loss
-        
-        # Average the action loss across the batch
-        action_loss = total_action_loss / batch_size if batch_size > 0 else 0.0
+        # Calculate action loss
+        print(f"predicted_actions.shape: {predicted_actions.shape}")
+        print(f"encoded_actions.shape: {encoded_actions.shape}")
+        print(f"predicted_actions: {predicted_actions}")
+        print(f"encoded_actions: {encoded_actions}")
+        action_loss = F.mse_loss(predicted_actions, encoded_actions, reduction="mean")
 
         # Combine losses with equal weights
         total_loss = video_loss + action_loss
