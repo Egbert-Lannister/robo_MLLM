@@ -254,7 +254,12 @@ class RoboMultimodelTrainer(Trainer):
             sample_encoded_action = encoded_actions[i].to(self.accelerator.device)  # Get ground truth action for this sample
             
             # Encode the predicted action
-            encoded_predicted_action = self.encode_action(sample_predicted_action.unsqueeze(0)).to(self.accelerator.device)
+            # encoded_predicted_action = self.encode_action(sample_predicted_action.unsqueeze(0)).to(self.accelerator.device)
+            encoded_predicted_action = sample_predicted_action
+            print(f"encoded_predicted_action: {encoded_predicted_action.device}")
+            print(f"sample_encoded_action: {sample_encoded_action.device}")
+            print(f"encoded_predicted_action: {encoded_predicted_action.shape}")
+            print(f"sample_encoded_action: {sample_encoded_action.shape}")
             
             # Calculate length for both sequences and find the minimum
             min_length = min(len(sample_encoded_action), len(encoded_predicted_action))
@@ -262,7 +267,7 @@ class RoboMultimodelTrainer(Trainer):
             # Calculate MSE loss on the common length
             if min_length > 0:
                 sample_action_loss = F.mse_loss(
-                    encoded_predicted_action[:min_length], 
+                    encoded_predicted_action[:min_length],
                     sample_encoded_action[:min_length],
                     reduction="mean"
                 )
@@ -273,5 +278,9 @@ class RoboMultimodelTrainer(Trainer):
 
         # Combine losses with equal weights
         total_loss = video_loss + action_loss
+
+        print(f"Video Loss: {video_loss.item()}, Action Loss: {action_loss.item()}")
+        print(f"Total Loss: {total_loss.device}, Video Loss: {video_loss.device}, Action Loss: {action_loss.device}")
+        print(f"total_loss type: {total_loss.dtype}, video_loss type: {video_loss.dtype}, action_loss type: {action_loss.dtype}")
 
         return total_loss
