@@ -44,11 +44,30 @@ class ActionTransformer(nn.Module):
         Returns:
             action_latent: [B, output_dim]
         """
+        if torch.isnan(hidden_states).any():
+            print("[DEBUG] NaN detected in input hidden_states!")
+
+
         x = self.transformer_encoder(hidden_states)  # [B, T, D]
+
+        if torch.isnan(x).any():
+            print("[DEBUG] NaN detected after TransformerEncoder!")
+
         x = x.transpose(1, 2)  # [B, D, T]
-        x = self.pooler(x)     # [B, D, 1]
-        x = x.squeeze(-1)      # [B, D]
+
+        if torch.isnan(x).any():
+            print("[DEBUG] NaN detected after transpose!")
+
+        x = x.mean(dim=-1)
+
+        if torch.isnan(x).any():
+            print("[DEBUG] NaN detected after mean!")
+
         x = self.action_proj(x)  # [B, output_dim]
+
+        if torch.isnan(x).any():
+            print("[DEBUG] NaN detected after action_proj!")
+
         return x
 
 
@@ -264,9 +283,11 @@ class RoboMultiTransformerModel(ModelMixin, ConfigMixin, PeftAdapterMixin, Cache
         use_rotary_positional_embeddings: bool = False,
         use_learned_positional_embeddings: bool = False,
         patch_bias: bool = True,
+        action_hidden_dim: int = 512,
     ):
         super().__init__()
         inner_dim = num_attention_heads * attention_head_dim
+        self.action_hidden_dim = action_hidden_dim
 
         if not use_rotary_positional_embeddings and use_learned_positional_embeddings:
             raise ValueError(
@@ -349,12 +370,30 @@ class RoboMultiTransformerModel(ModelMixin, ConfigMixin, PeftAdapterMixin, Cache
         self.pred_action_dim = 8
         
         self.action_transformer = ActionTransformer(
-            input_dim=num_attention_heads * attention_head_dim,
-            hidden_dim=512,  # 默认就行
+            input_dim=2 * action_hidden_dim,
+            hidden_dim=512,
             # output_dim=self.pred_action_dim * self.pred_action_length,  # 328 = 41 * 8
             num_layers=2,
             num_heads=8,
             dropout=0.1,
+        )
+
+        # 5. Image encoder for action
+        self.image_encoder_for_action = nn.Sequential(
+            nn.Conv3d(in_channels, 64, kernel_size=3, stride=2, padding=1),  # [B, 64, T/2, H/2, W/2]
+            nn.ReLU(),
+            nn.Conv3d(64, 128, kernel_size=3, stride=2, padding=1), # [B, 128, T/4, H/4, W/4]
+            nn.ReLU(),
+            nn.AdaptiveAvgPool3d((1, 1, 1)),                                 # [B, 128, 1, 1, 1]
+            nn.Flatten(),                                                    # [B, 128]
+            nn.Linear(128, self.action_hidden_dim),                               # 映射到 action_hidden_dim，例如512
+        )
+
+        # 6. Prompt encoder for action
+        self.prompt_encoder_for_action = nn.Sequential(
+                nn.Linear(4096, 1024),
+                nn.ReLU(),
+                nn.Linear(1024, self.action_hidden_dim),
         )
 
         self.enable_gradient_checkpointing()
@@ -491,8 +530,20 @@ class RoboMultiTransformerModel(ModelMixin, ConfigMixin, PeftAdapterMixin, Cache
                 )
 
         batch_size, num_frames, channels, height, width = hidden_states.shape
+        # Shape of hidden_states: [B, T, C, H, W] -> [2, 12, 32, 60, 80]
+        # Shape of encoder_hidden_states: [B, 226, 4096] -> [2, 226, 4096]
 
-        # 1. Time embedding
+        # 1. Image encoder for action
+        hidden_states_for_action = hidden_states.transpose(1, 2)  # [B, C, T, H, W]
+        image_features = self.image_encoder_for_action(hidden_states_for_action)  # [B, D]
+        # 2. Prompt encoder for action
+        prompt_features = self.prompt_encoder_for_action(encoder_hidden_states)  # [B, D]
+        prompt_features = prompt_features.mean(dim=1)  # [B, hidden_dim]
+
+        # 3. Concatenate image and prompt features
+        fused_features = torch.cat([image_features, prompt_features], dim=-1)  # [B, 2D]: [2, 1024]
+
+        # 4. Time embedding
         timesteps = timestep
         t_emb = self.time_proj(timesteps)
 
@@ -508,7 +559,7 @@ class RoboMultiTransformerModel(ModelMixin, ConfigMixin, PeftAdapterMixin, Cache
             ofs_emb = self.ofs_embedding(ofs_emb)
             emb = emb + ofs_emb
 
-        # 2. Patch embedding
+        # 4. Patch embedding
         hidden_states = self.patch_embed(encoder_hidden_states, hidden_states)
         hidden_states = self.embedding_dropout(hidden_states)
 
@@ -516,7 +567,7 @@ class RoboMultiTransformerModel(ModelMixin, ConfigMixin, PeftAdapterMixin, Cache
         encoder_hidden_states = hidden_states[:, :text_seq_length]
         hidden_states = hidden_states[:, text_seq_length:]
 
-        # 3. Transformer blocks
+        # 5. Transformer blocks
         for i, block in enumerate(self.transformer_blocks):
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 hidden_states, encoder_hidden_states = self._gradient_checkpointing_func(
@@ -537,30 +588,21 @@ class RoboMultiTransformerModel(ModelMixin, ConfigMixin, PeftAdapterMixin, Cache
                 )
 
         hidden_states = self.norm_final(hidden_states)
-        
-        # 4. Detach for action prediction
-        hidden_states_for_action = hidden_states.detach()
 
-        # 5. Final block for video output 
+        # 7. Final block for video output 
         hidden_states_video = self.norm_out(hidden_states, temb=emb)
         hidden_states_video = self.proj_out(hidden_states_video)
 
-        # 6. Action Prediction
+        # 8. Action Prediction
+        fused_features = fused_features.unsqueeze(1)
 
-        B, T_total, D = hidden_states_for_action.shape
+        predicted_actions = self.action_transformer(fused_features)  # [B, 168]
+        print(f"predicted_actions.shape: {predicted_actions.shape}")  # [B, 168]
 
-        num_patches_per_frame = (self.config.sample_height // self.config.patch_size) * (self.config.sample_width // self.config.patch_size)
+        # 6. reshape成动作序列 [B, 41, 8]
+        # predicted_actions = predicted_actions.view(-1, self.pred_action_length, self.pred_action_dim)
 
-        latent_num_frames = T_total // num_patches_per_frame
-        hidden_states_for_action = hidden_states_for_action[:, :latent_num_frames * num_patches_per_frame, :]
-        hidden_states_for_action = hidden_states_for_action.view(B, latent_num_frames, num_patches_per_frame, D)
-        hidden_states_for_action = hidden_states_for_action.mean(dim=2)
-
-        predicted_actions = self.action_transformer(hidden_states_for_action)
-        print("[DEBUG] predicted_actions.shape: ", predicted_actions.shape)
-        # predicted_actions = predicted_actions.view(B, self.pred_action_length, self.pred_action_dim)  # 让它成为 [B, 41, 8]
-
-        # 7. Unpatchify for video output
+        # 9. Unpatchify for video output
         p = self.config.patch_size
         p_t = self.config.patch_size_t
 
