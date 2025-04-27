@@ -535,10 +535,6 @@ class Trainer:
 
                 accelerator.log(logs, step=global_step)
 
-                if global_step % self.args.checkpointing_steps == 0:
-                    if self.accelerator.is_main_process:
-                        self.save_model(output_dir=self.args.output_dir, global_step=global_step)
-
                 if global_step >= self.args.train_steps:
                     break
 

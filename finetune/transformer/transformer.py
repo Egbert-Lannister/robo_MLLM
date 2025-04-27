@@ -20,9 +20,11 @@ from diffusers.models.normalization import AdaLayerNorm, CogVideoXLayerNormZero
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 class ActionTransformer(nn.Module):
-    def __init__(self, input_dim, hidden_dim=512, output_dim=168, num_layers=2, num_heads=8, dropout=0.1):
+    def __init__(self, input_dim, hidden_dim=512, pred_action_dim=8, pred_action_length=41, output_dim=168, num_layers=2, num_heads=8, dropout=0.1):
         super().__init__()
         self.output_dim = output_dim
+        self.pred_action_dim = pred_action_dim
+        self.pred_action_length = pred_action_length
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=input_dim,
@@ -35,12 +37,16 @@ class ActionTransformer(nn.Module):
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
         # Instead of predicting 41 x 8, we predict a fixed latent vector (e.g., 168-d)
-        self.pooler = nn.AdaptiveAvgPool1d(1)  # [B, D, T] -> [B, D, 1]
         self.action_proj = nn.Linear(input_dim, output_dim)  # 直接映射到 latent_dim，比如168
+
+        self.mlp_head = nn.Sequential(
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, pred_action_dim),
+        )
 
     def forward(self, hidden_states):
         """
-        hidden_states: [B, T, D]
+        hidden_states: [B, T, D] -> [B, 41, 2D]
         Returns:
             action_latent: [B, output_dim]
         """
@@ -53,20 +59,10 @@ class ActionTransformer(nn.Module):
         if torch.isnan(x).any():
             print("[DEBUG] NaN detected after TransformerEncoder!")
 
-        x = x.transpose(1, 2)  # [B, D, T]
+        x = self.mlp_head(x)  # [B, T, 8]
 
         if torch.isnan(x).any():
-            print("[DEBUG] NaN detected after transpose!")
-
-        x = x.mean(dim=-1)
-
-        if torch.isnan(x).any():
-            print("[DEBUG] NaN detected after mean!")
-
-        x = self.action_proj(x)  # [B, output_dim]
-
-        if torch.isnan(x).any():
-            print("[DEBUG] NaN detected after action_proj!")
+            print("[DEBUG] NaN detected after mlp_head!")
 
         return x
 
@@ -284,10 +280,14 @@ class RoboMultiTransformerModel(ModelMixin, ConfigMixin, PeftAdapterMixin, Cache
         use_learned_positional_embeddings: bool = False,
         patch_bias: bool = True,
         action_hidden_dim: int = 512,
+        pred_action_length: int = 41,
+        pred_action_dim: int = 8,
     ):
         super().__init__()
         inner_dim = num_attention_heads * attention_head_dim
         self.action_hidden_dim = action_hidden_dim
+        self.action_time_embedding = nn.Embedding(self.pred_action_length, self.action_hidden_dim * 2)
+
 
         if not use_rotary_positional_embeddings and use_learned_positional_embeddings:
             raise ValueError(
@@ -366,12 +366,14 @@ class RoboMultiTransformerModel(ModelMixin, ConfigMixin, PeftAdapterMixin, Cache
 
         self.proj_out = nn.Linear(inner_dim, output_dim)
 
-        self.pred_action_length = 41
-        self.pred_action_dim = 8
+        self.pred_action_length = pred_action_length
+        self.pred_action_dim = pred_action_dim
         
         self.action_transformer = ActionTransformer(
             input_dim=2 * action_hidden_dim,
             hidden_dim=512,
+            pred_action_dim=pred_action_dim, # 8
+            pred_action_length=pred_action_length, # 41
             # output_dim=self.pred_action_dim * self.pred_action_length,  # 328 = 41 * 8
             num_layers=2,
             num_heads=8,
@@ -594,10 +596,15 @@ class RoboMultiTransformerModel(ModelMixin, ConfigMixin, PeftAdapterMixin, Cache
         hidden_states_video = self.proj_out(hidden_states_video)
 
         # 8. Action Prediction
-        fused_features = fused_features.unsqueeze(1)
+        fused_features = fused_features.unsqueeze(1) # [B, 1, 2D]
 
-        predicted_actions = self.action_transformer(fused_features)  # [B, 168]
-        print(f"predicted_actions.shape: {predicted_actions.shape}")  # [B, 168]
+        fused_features = fused_features.expand(-1, self.pred_action_length, -1) # [B, 41, 2D]
+        time_ids = torch.arange(self.pred_action_length, device=fused_features.device).unsqueeze(0).expand(fused_features.size(0), -1) # [B, 41]
+        time_features = self.action_time_embedding(time_ids) # [B, 41, 2D]
+
+        fused_features = fused_features + time_features # [B, 41, 2D]
+
+        predicted_actions = self.action_transformer(fused_features)  # [B, 41, 8]
 
         # 6. reshape成动作序列 [B, 41, 8]
         # predicted_actions = predicted_actions.view(-1, self.pred_action_length, self.pred_action_dim)

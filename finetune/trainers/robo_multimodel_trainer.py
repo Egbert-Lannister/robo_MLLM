@@ -19,6 +19,9 @@ from finetune.trainer import Trainer
 from finetune.utils import unwrap_model
 from finetune.transformer.transformer import RoboMultiTransformerModel
 
+import logging
+logger = logging.getLogger(__name__)
+
 
 class RoboMultimodelTrainer(Trainer):
     UNLOAD_LIST = ["text_encoder"]
@@ -110,6 +113,20 @@ class RoboMultimodelTrainer(Trainer):
 
         return action_token
     
+    def batch_action_tokenizer(self, actions_batch: torch.Tensor) -> torch.Tensor:
+        # actions_batch: [B, 328]
+        outputs = []
+        device = actions_batch.device
+        for action in actions_batch:
+            action = action.detach().cpu().float()
+            token = self.encode_action(action)
+            if isinstance(token, list):
+                token = torch.tensor(token, device=action.device)
+            token = token.view(-1)
+
+            outputs.append(token)
+        
+        return torch.stack(outputs).to(device)  # [B, 168]
     
     @override
     def collate_fn(self, samples: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -272,17 +289,18 @@ class RoboMultimodelTrainer(Trainer):
         video_loss = video_loss.mean()
 
         # Calculate action loss
-        print(f"predicted_actions.shape: {predicted_actions.shape}")
-        print(f"encoded_actions.shape: {encoded_actions.shape}")
-        print(f"predicted_actions: {predicted_actions}")
-        print(f"encoded_actions: {encoded_actions}")
-        action_loss = F.mse_loss(predicted_actions, encoded_actions, reduction="mean")
+        predicted_actions_encoded = self.batch_action_tokenizer(predicted_actions)
+
+        predicted_actions_encoded = predicted_actions_encoded.to(dtype=torch.bfloat16)
+        encoded_actions = encoded_actions.to(dtype=torch.bfloat16)
+
+        action_loss = F.mse_loss(predicted_actions_encoded, encoded_actions, reduction="mean")
 
         # Combine losses with equal weights
         total_loss = video_loss + action_loss
 
-        print(f"Video Loss: {video_loss.item()}, Action Loss: {action_loss.item()}")
-        print(f"Total Loss: {total_loss.device}, Video Loss: {video_loss.device}, Action Loss: {action_loss.device}")
-        print(f"total_loss type: {total_loss.dtype}, video_loss type: {video_loss.dtype}, action_loss type: {action_loss.dtype}")
+        logger.info(f"Video Loss: {video_loss.item()}, Action Loss: {action_loss.item()}")
+        logger.info(f"Total Loss: {total_loss.device}, Video Loss: {video_loss.device}, Action Loss: {action_loss.device}") 
+        logger.info(f"total_loss type: {total_loss.dtype}, video_loss type: {video_loss.dtype}, action_loss type: {action_loss.dtype}")
 
         return total_loss
