@@ -12,10 +12,10 @@ from diffusers.models.attention import Attention, FeedForward
 from diffusers.models.attention_processor import AttentionProcessor, CogVideoXAttnProcessor2_0, FusedCogVideoXAttnProcessor2_0
 from diffusers.models.cache_utils import CacheMixin
 from diffusers.models.embeddings import CogVideoXPatchEmbed, TimestepEmbedding, Timesteps
-from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.normalization import AdaLayerNorm, CogVideoXLayerNormZero
 
+from finetune.pipeline.robo_MLLM_PipelineOutput import RoboMultiPipelineOutput
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -242,6 +242,12 @@ class RoboMultiTransformerModel(ModelMixin, ConfigMixin, PeftAdapterMixin, Cache
             Scaling factor to apply in 3D positional embeddings across spatial dimensions.
         temporal_interpolation_scale (`float`, defaults to `1.0`):
             Scaling factor to apply in 3D positional embeddings across temporal dimensions.
+        action_hidden_dim (`int`, defaults to `512`):
+            The number of channels in the action hidden dimension.
+        pred_action_length (`int`, defaults to `41`):
+            The number of frames in the action.
+        pred_action_dim (`int`, defaults to `8`):
+            The number of channels in the action.
     """
 
     _skip_layerwise_casting_patterns = ["patch_embed", "norm"]
@@ -282,10 +288,13 @@ class RoboMultiTransformerModel(ModelMixin, ConfigMixin, PeftAdapterMixin, Cache
         action_hidden_dim: int = 512,
         pred_action_length: int = 41,
         pred_action_dim: int = 8,
+        enable_action_transformer: bool = True,
     ):
         super().__init__()
         inner_dim = num_attention_heads * attention_head_dim
         self.action_hidden_dim = action_hidden_dim
+        self.pred_action_dim = pred_action_dim
+        self.pred_action_length = pred_action_length
         self.action_time_embedding = nn.Embedding(self.pred_action_length, self.action_hidden_dim * 2)
 
 
@@ -366,20 +375,6 @@ class RoboMultiTransformerModel(ModelMixin, ConfigMixin, PeftAdapterMixin, Cache
 
         self.proj_out = nn.Linear(inner_dim, output_dim)
 
-        self.pred_action_length = pred_action_length
-        self.pred_action_dim = pred_action_dim
-        
-        self.action_transformer = ActionTransformer(
-            input_dim=2 * action_hidden_dim,
-            hidden_dim=512,
-            pred_action_dim=pred_action_dim, # 8
-            pred_action_length=pred_action_length, # 41
-            # output_dim=self.pred_action_dim * self.pred_action_length,  # 328 = 41 * 8
-            num_layers=2,
-            num_heads=8,
-            dropout=0.1,
-        )
-
         # 5. Image encoder for action
         self.image_encoder_for_action = nn.Sequential(
             nn.Conv3d(in_channels, 64, kernel_size=3, stride=2, padding=1),  # [B, 64, T/2, H/2, W/2]
@@ -398,7 +393,51 @@ class RoboMultiTransformerModel(ModelMixin, ConfigMixin, PeftAdapterMixin, Cache
                 nn.Linear(1024, self.action_hidden_dim),
         )
 
+        self.enable_action_transformer = enable_action_transformer
+        if self.enable_action_transformer:
+            self.action_transformer = ActionTransformer(
+                input_dim=2 * action_hidden_dim,
+                hidden_dim=512,
+                pred_action_dim=pred_action_dim,
+                pred_action_length=pred_action_length,
+                num_layers=2,
+                num_heads=8,
+                dropout=0.1,
+            )
+
+        self.register_module("patch_embed", self.patch_embed)
+        self.register_module("transformer_blocks", self.transformer_blocks)
+        self.register_module("norm_final", self.norm_final)
+        self.register_module("norm_out", self.norm_out)
+        self.register_module("proj_out", self.proj_out)
+        self.register_module("action_time_embedding", self.action_time_embedding)
+        self.register_module("action_transformer", self.action_transformer)
+        self.register_module("image_encoder_for_action", self.image_encoder_for_action)
+        self.register_module("prompt_encoder_for_action", self.prompt_encoder_for_action)
+
+        if self.enable_action_transformer:
+            self.register_module("action_transformer", self.action_transformer)
+
         self.enable_gradient_checkpointing()
+
+    def load_state_dict_pre_hook(self, state_dict: Dict[str, torch.Tensor]):
+        """
+        Hook function to load state_dict for custom modules like action_transformer
+        """
+        if 'action_transformer' in state_dict:
+            logger.info("Loading action_transformer weights...")
+            state_dict['action_transformer'] = state_dict.pop('action_transformer')
+        
+        return state_dict
+    
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
+        """
+        A custom from_pretrained method that includes a hook to load custom weights for action_transformer
+        """
+        model = super().from_pretrained(pretrained_model_name_or_path, **kwargs)
+        model.load_state_dict_pre_hook(model.state_dict())
+        return model
 
     def enable_gradient_checkpointing(self):
         self.gradient_checkpointing = True
@@ -628,4 +667,5 @@ class RoboMultiTransformerModel(ModelMixin, ConfigMixin, PeftAdapterMixin, Cache
 
         if not return_dict:
             return (output, predicted_actions)
-        return Transformer2DModelOutput(sample=output, predicted_actions=predicted_actions)
+        
+        return RoboMultiPipelineOutput(frames=output, actions=predicted_actions)

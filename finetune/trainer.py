@@ -262,7 +262,7 @@ class Trainer:
         # trainable_parameters = list(filter(lambda p: p.requires_grad, self.components.transformer.parameters()))
 
         trainable_parameters = []
-        for name in ["transformer", "action_predictor"]:
+        for name in ["transformer"]:
             comp = getattr(self.components, name, None)
             if comp:
                 trainable_parameters += list(filter(lambda p: p.requires_grad, comp.parameters()))
